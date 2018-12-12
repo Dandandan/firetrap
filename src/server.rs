@@ -21,7 +21,7 @@ use crate::commands::Command;
 /// InternalMsg represents a status message from the data channel handler to our main (per connection)
 /// event handler.
 // TODO: Give these events better names
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum InternalMsg {
     // Permission Denied
     PermissionDenied,
@@ -55,7 +55,7 @@ enum InternalMsg {
 
 /// Event represents an `Event` that will be handled by our per-client event loop. It can be either
 /// a command from the client, or a status message from the data channel handler.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum Event {
     /// A command from a client (e.g. `USER` or `PASV`)
     Command(commands::Command),
@@ -243,6 +243,7 @@ struct Session<S>
     data_abort_tx: Option<mpsc::Sender<()>>,
     data_abort_rx: Option<mpsc::Receiver<()>>,
     cwd: std::path::PathBuf,
+    rename_from: Option<std::path::PathBuf>,
     state: SessionState,
 }
 
@@ -268,6 +269,7 @@ impl<S> Session<S>
             data_abort_tx: None,
             data_abort_rx: None,
             cwd: "/".into(),
+            rename_from: None,
             state: SessionState::New,
         }
     }
@@ -645,6 +647,8 @@ impl<S> Server<S>
             use self::SessionState::*;
             use self::InternalMsg::*;
 
+            info!("Processing event {:?}", event);
+
             match event {
                 Event::Command(cmd) => {
                     match cmd {
@@ -933,6 +937,24 @@ impl<S> Server<S>
                             let path = session.cwd.join(&filename).to_string_lossy().to_string();
                             spawn!(tx.send(Command::Stor{path: path}));
                             Ok(format!("150 {}\r\n", filename.to_string_lossy()))
+                        },
+                        Command::Rnfr{file} => {
+                            ensure_authenticated!();
+                            let mut session = session.lock()?;
+                            session.rename_from = Some(file);
+                            Ok("350 Tell me, what would you like the new name to be?\r\n".to_string())
+                        },
+                        Command::Rnto{file} => {
+                            ensure_authenticated!();
+                            let mut session = session.lock()?;
+                            let storage = Arc::clone(&session.storage);
+                            match session.rename_from.take() {
+                                Some(from) => {
+                                    spawn!(storage.rename(from, file));
+                                    Ok("250 sure, it shall be known\r\n".to_string())
+                                },
+                                None => return Ok("450 Please tell me what file you want to rename first\r\n".to_string())
+                            }
                         },
                     }
                 },
